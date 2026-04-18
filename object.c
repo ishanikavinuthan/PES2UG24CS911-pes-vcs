@@ -112,6 +112,31 @@ if (object_exists(id_out)) {
     free(buffer);
     return 0;
 }
+char path[512];
+object_path(id_out, path, sizeof(path));
+
+// create directory
+char dir[512];
+strncpy(dir, path, sizeof(dir));
+char *slash = strrchr(dir, '/');
+if (slash) {
+    *slash = '\0';
+    mkdir(OBJECTS_DIR, 0755);
+    mkdir(dir, 0755);
+}
+
+// write file
+FILE *f = fopen(path, "wb");
+if (!f) {
+    free(buffer);
+    return -1;
+}
+
+fwrite(buffer, 1, total_size, f);
+fclose(f);
+free(buffer);
+
+return 0;
     (void)type; (void)data; (void)len; (void)id_out;
     //start implementation//
 }
