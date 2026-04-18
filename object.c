@@ -106,8 +106,14 @@ unsigned char *buffer = malloc(total_size);
 memcpy(buffer, header, header_len);
 buffer[header_len] = '\0';
 memcpy(buffer + header_len + 1, data, len);
+compute_hash(buffer, total_size, id_out);
+
+if (object_exists(id_out)) {
+    free(buffer);
+    return 0;
+}
     (void)type; (void)data; (void)len; (void)id_out;
-    return -1;
+    //start implementation//
 }
 
 // Read an object from the store.
@@ -135,5 +141,5 @@ memcpy(buffer + header_len + 1, data, len);
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
     // TODO: Implement
     (void)id; (void)type_out; (void)data_out; (void)len_out;
-    // start implementation
+    return -1;
 }
