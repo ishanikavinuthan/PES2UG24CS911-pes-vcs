@@ -137,6 +137,17 @@ fclose(f);
 free(buffer);
 
 return 0;
+FILE *f = fopen(path, "wb");
+if (!f) {
+    free(buffer);
+    return -1;
+}
+
+fwrite(buffer, 1, total_size, f);
+fclose(f);
+
+free(buffer);
+return 0;
     (void)type; (void)data; (void)len; (void)id_out;
     //start implementation//
 }
