@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include <dirent.h>
 
+
 // ─── PROVIDED ────────────────────────────────────────────────────────────────
 
 // Find an index entry by path (linear scan).
@@ -135,10 +136,36 @@ int index_status(const Index *index) {
 //
 // Returns 0 on success, -1 on error.
 int index_load(Index *index) {
-    // TODO: Implement index loading
-    // (See Lab Appendix for logical steps)
-    (void)index;
-    return -1;
+    FILE *f = fopen(INDEX_FILE, "r");
+
+    // If file doesn't exist → empty index
+    if (!f) {
+        index->count = 0;
+        return 0;
+    }
+
+    index->count = 0;
+
+    char path[256];
+    char hash_hex[HASH_HEX_SIZE + 1];
+    unsigned int mode;
+    size_t size;
+    long mtime;
+
+    while (fscanf(f, "%s %s %o %zu %ld\n",
+                  hash_hex, path, &mode, &size, &mtime) == 5) {
+
+        IndexEntry *e = &index->entries[index->count++];
+
+        strcpy(e->path, path);
+        hex_to_hash(hash_hex, &e->hash);
+        e->mode = mode;
+        e->size = size;
+        e->mtime_sec = mtime;
+    }
+
+    fclose(f);
+    return 0;
 }
 
 // Save the index to .pes/index atomically.
@@ -152,10 +179,25 @@ int index_load(Index *index) {
 //
 // Returns 0 on success, -1 on error.
 int index_save(const Index *index) {
-    // TODO: Implement atomic index saving
-    // (See Lab Appendix for logical steps)
-    (void)index;
-    return -1;
+    FILE *f = fopen(INDEX_FILE ".tmp", "w");
+    if (!f) return -1;
+
+    for (int i = 0; i < index->count; i++) {
+        char hex[HASH_HEX_SIZE + 1];
+        hash_to_hex(&index->entries[i].hash, hex);
+
+        fprintf(f, "%s %s %o %zu %ld\n",
+                hex,
+                index->entries[i].path,
+                index->entries[i].mode,
+                index->entries[i].size,
+                index->entries[i].mtime_sec);
+    }
+
+    fclose(f);
+
+    rename(INDEX_FILE ".tmp", INDEX_FILE);
+    return 0;
 }
 
 // Stage a file for the next commit.
@@ -168,8 +210,50 @@ int index_save(const Index *index) {
 //
 // Returns 0 on success, -1 on error.
 int index_add(Index *index, const char *path) {
-    // TODO: Implement file staging
-    // (See Lab Appendix for logical steps)
-    (void)index; (void)path;
-    return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "error: cannot open %s\n", path);
+        return -1;
+    }
+
+    fseek(f, 0, SEEK_END);
+    size_t size = ftell(f);
+    rewind(f);
+
+    void *data = malloc(size);
+    fread(data, 1, size, f);
+    fclose(f);
+
+    // ✅ FIXED: correct declaration
+    ObjectID id;
+
+    // ✅ write object
+    if (object_write(OBJ_BLOB, data, size, &id) != 0) {
+        free(data);
+        return -1;
+    }
+
+    struct stat st;
+    stat(path, &st);
+
+    IndexEntry *e = index_find(index, path);
+
+    if (!e) {
+        e = &index->entries[index->count++];
+    }
+
+    strcpy(e->path, path);
+
+    // either this:
+    memcpy(&e->hash, &id, sizeof(ObjectID)); 
+    // OR this also works:
+    // e->id = id;
+
+    e->mode = st.st_mode;
+    e->size = size;
+    e->mtime_sec = st.st_mtime;
+
+    free(data);
+
+    return index_save(index);
 }

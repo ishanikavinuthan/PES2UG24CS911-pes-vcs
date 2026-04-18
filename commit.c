@@ -24,6 +24,9 @@
 #include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <sys/stat.h>
 
 // Forward declarations (implemented in object.c)
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
@@ -73,34 +76,45 @@ int commit_parse(const void *data, size_t len, Commit *commit_out) {
 
 // Serialize a Commit struct to the text format.
 // Caller must free(*data_out).
-int commit_serialize(const Commit *commit, void **data_out, size_t *len_out) {
+int commit_serialize(const Commit *c, void **data_out, size_t *len_out) {
+    char buffer[8192];
+
+    int offset = 0;
+
+    // tree
     char tree_hex[HASH_HEX_SIZE + 1];
-    char parent_hex[HASH_HEX_SIZE + 1];
-    hash_to_hex(&commit->tree, tree_hex);
+    hash_to_hex(&c->tree, tree_hex);
+    offset += sprintf(buffer + offset, "tree %s\n", tree_hex);
 
-    char buf[8192];
-    int n = 0;
-    n += snprintf(buf + n, sizeof(buf) - n, "tree %s\n", tree_hex);
-    if (commit->has_parent) {
-        hash_to_hex(&commit->parent, parent_hex);
-        n += snprintf(buf + n, sizeof(buf) - n, "parent %s\n", parent_hex);
+    // parent (if exists)
+    if (c->has_parent) {
+        char parent_hex[HASH_HEX_SIZE + 1];
+        hash_to_hex(&c->parent, parent_hex);
+        offset += sprintf(buffer + offset, "parent %s\n", parent_hex);
     }
-    n += snprintf(buf + n, sizeof(buf) - n,
-                  "author %s %" PRIu64 "\n"
-                  "committer %s %" PRIu64 "\n"
-                  "\n"
-                  "%s",
-                  commit->author, commit->timestamp,
-                  commit->author, commit->timestamp,
-                  commit->message);
 
-    *data_out = malloc(n + 1);
+    // author
+    offset += sprintf(buffer + offset, "author %s\n", c->author);
+
+    // timestamp
+    offset += sprintf(buffer + offset, "time %llu\n",
+                      (unsigned long long)c->timestamp);
+
+    // blank line
+    offset += sprintf(buffer + offset, "\n");
+
+    // message
+    offset += sprintf(buffer + offset, "%s\n", c->message);
+
+    // allocate output
+    *data_out = malloc(offset);
     if (!*data_out) return -1;
-    memcpy(*data_out, buf, n + 1);
-    *len_out = (size_t)n;
+
+    memcpy(*data_out, buffer, offset);
+    *len_out = offset;
+
     return 0;
 }
-
 // Walk commit history from HEAD to the root.
 int commit_walk(commit_walk_fn callback, void *ctx) {
     ObjectID id;
@@ -129,56 +143,73 @@ int commit_walk(commit_walk_fn callback, void *ctx) {
 int head_read(ObjectID *id_out) {
     FILE *f = fopen(HEAD_FILE, "r");
     if (!f) return -1;
-    char line[512];
-    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+
+    char ref[256];
+    if (!fgets(ref, sizeof(ref), f)) {
+        fclose(f);
+        return -1;
+    }
     fclose(f);
-    line[strcspn(line, "\r\n")] = '\0'; // strip newline
+
+    // 🔥 FIXED
+    if (strncmp(ref, "ref:", 4) != 0) return -1;
+
+    char *ref_name = ref + 4;
+    while (*ref_name == ' ') ref_name++;  // skip spaces
+
+    ref_name[strcspn(ref_name, "\n")] = 0;
 
     char ref_path[512];
-    if (strncmp(line, "ref: ", 5) == 0) {
-        snprintf(ref_path, sizeof(ref_path), "%s/%s", PES_DIR, line + 5);
-        f = fopen(ref_path, "r");
-        if (!f) return -1; // Branch exists but has no commits yet
-        if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
-        fclose(f);
-        line[strcspn(line, "\r\n")] = '\0';
-    }
-    return hex_to_hash(line, id_out);
-}
+    snprintf(ref_path, sizeof(ref_path), ".pes/%s", ref_name);
 
+    FILE *rf = fopen(ref_path, "r");
+    if (!rf) return -1;
+
+    char hex[HASH_HEX_SIZE + 1];
+    if (!fgets(hex, sizeof(hex), rf)) {
+        fclose(rf);
+        return -1;
+    }
+    fclose(rf);
+
+    hex[strcspn(hex, "\n")] = 0;
+    return hex_to_hash(hex, id_out);
+}
 // Update the current branch ref to point to a new commit atomically.
 int head_update(const ObjectID *new_commit) {
-    FILE *f = fopen(HEAD_FILE, "r");
-    if (!f) return -1;
-    char line[512];
-    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
-    fclose(f);
-    line[strcspn(line, "\r\n")] = '\0';
-
-    char target_path[520];
-    if (strncmp(line, "ref: ", 5) == 0) {
-        snprintf(target_path, sizeof(target_path), "%s/%s", PES_DIR, line + 5);
-    } else {
-        snprintf(target_path, sizeof(target_path), "%s", HEAD_FILE); // Detached HEAD
-    }
-
-    char tmp_path[528];
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", target_path);
-    
-    f = fopen(tmp_path, "w");
-    if (!f) return -1;
-    
     char hex[HASH_HEX_SIZE + 1];
     hash_to_hex(new_commit, hex);
-    fprintf(f, "%s\n", hex);
-    
-    fflush(f);
-    fsync(fileno(f));
-    fclose(f);
-    
-    return rename(tmp_path, target_path);
-}
 
+    FILE *f = fopen(HEAD_FILE, "r");
+    if (!f) return -1;
+
+    char ref[256];
+    if (!fgets(ref, sizeof(ref), f)) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+
+    if (strncmp(ref, "ref: ", 5) != 0) return -1;
+
+    char *ref_name = ref + 5;
+    ref_name[strcspn(ref_name, "\n")] = 0;
+
+    char ref_path[512];
+    snprintf(ref_path, sizeof(ref_path), ".pes/%s", ref_name);
+
+    mkdir(".pes", 0755);
+    mkdir(".pes/refs", 0755);
+    mkdir(".pes/refs/heads", 0755);
+
+    FILE *rf = fopen(ref_path, "w");
+    if (!rf) return -1;
+
+    fprintf(rf, "%s\n", hex);
+    fclose(rf);
+
+    return 0;
+}
 // ─── TODO: Implement these ───────────────────────────────────────────────────
 
 // Create a new commit from the current staging area.
@@ -194,8 +225,59 @@ int head_update(const ObjectID *new_commit) {
 //
 // Returns 0 on success, -1 on error.
 int commit_create(const char *message, ObjectID *commit_id_out) {
-    // TODO: Implement commit creation
-    // (See Lab Appendix for logical steps)
-    (void)message; (void)commit_id_out;
-    return -1;
+    printf("STEP 1: tree\n");
+    ObjectID tree_id;
+    if (tree_from_index(&tree_id) != 0) {
+        printf("FAIL: tree_from_index\n");
+        return -1;
+    }
+
+    printf("STEP 2: struct\n");
+    Commit c;
+    memset(&c, 0, sizeof(Commit));
+    c.tree = tree_id;
+
+    printf("STEP 3: head_read\n");
+    if (head_read(&c.parent) == 0) {
+        c.has_parent = 1;
+    } else {
+        c.has_parent = 0;
+    }
+
+    printf("STEP 4: author\n");
+    const char *author = getenv("PES_AUTHOR");
+    if (!author) author = "unknown";
+    snprintf(c.author, sizeof(c.author), "%s", author);
+
+    printf("STEP 5: time\n");
+    c.timestamp = time(NULL);
+
+    printf("STEP 6: message\n");
+    snprintf(c.message, sizeof(c.message), "%s", message);
+
+    printf("STEP 7: serialize\n");
+    void *data = NULL;
+    size_t len = 0;
+    if (commit_serialize(&c, &data, &len) != 0) {
+        printf("FAIL: serialize\n");
+        return -1;
+    }
+
+    printf("STEP 8: object_write\n");
+    if (object_write(OBJ_COMMIT, data, len, commit_id_out) != 0) {
+        printf("FAIL: object_write\n");
+        free(data);
+        return -1;
+    }
+
+    free(data);
+
+    printf("STEP 9: head_update\n");
+    if (head_update(commit_id_out) != 0) {
+        printf("FAIL: head_update\n");
+        return -1;
+    }
+
+    printf("SUCCESS\n");
+    return 0;
 }
