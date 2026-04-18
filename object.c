@@ -19,6 +19,8 @@
 
 // ─── PROVIDED ────────────────────────────────────────────────────────────────
 
+#include <openssl/sha.h>
+
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
 
     char header[64];
@@ -34,28 +36,30 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     buffer[header_len] = '\0';
     memcpy(buffer + header_len + 1, data, len);
 
-    compute_hash(buffer, total_size, id_out);
+    // 🔥 REAL HASH (instead of compute_hash)
+    SHA256(buffer, total_size, id_out->hash);
 
-    // Deduplication
-    if (object_exists(id_out)) {
+    // 🔥 CREATE BASE DIR
+    mkdir(".pes", 0755);
+    mkdir(".pes/objects", 0755);
+
+    // 🔥 BUILD PATH MANUALLY
+    char path[512];
+    sprintf(path, ".pes/objects/%02x", id_out->hash[0]);
+    mkdir(path, 0755);
+
+    sprintf(path + strlen(path), "/");
+    for (int i = 1; i < HASH_SIZE; i++) {
+        sprintf(path + strlen(path), "%02x", id_out->hash[i]);
+    }
+
+    // 🔥 CHECK IF FILE EXISTS (dedup)
+    if (access(path, F_OK) == 0) {
         free(buffer);
         return 0;
     }
 
-    char path[512];
-    object_path(id_out, path, sizeof(path));
-
-    // Create directory
-    char dir[512];
-    strncpy(dir, path, sizeof(dir));
-    char *slash = strrchr(dir, '/');
-    if (slash) {
-        *slash = '\0';
-        mkdir(OBJECTS_DIR, 0755);
-        mkdir(dir, 0755);
-    }
-
-    // Write file
+    // 🔥 WRITE FILE
     FILE *f = fopen(path, "wb");
     if (!f) {
         free(buffer);
@@ -67,4 +71,85 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 
     free(buffer);
     return 0;
+}
+int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
+
+    char path[512];
+    sprintf(path, ".pes/objects/%02x/", id->hash[0]);
+
+    for (int i = 1; i < HASH_SIZE; i++) {
+        sprintf(path + strlen(path), "%02x", id->hash[i]);
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    fseek(f, 0, SEEK_END);
+    size_t size = ftell(f);
+    rewind(f);
+
+    unsigned char *buffer = malloc(size);
+    fread(buffer, 1, size, f);
+    fclose(f);
+
+    // VERIFY HASH
+    unsigned char check[HASH_SIZE];
+    SHA256(buffer, size, check);
+
+    if (memcmp(check, id->hash, HASH_SIZE) != 0) {
+        free(buffer);
+        return -1;
+    }
+
+    // PARSE HEADER
+    char *null_pos = memchr(buffer, '\0', size);
+    if (!null_pos) {
+        free(buffer);
+        return -1;
+    }
+
+    size_t header_len = null_pos - (char *)buffer;
+    size_t data_len = size - header_len - 1;
+
+    *data_out = malloc(data_len);
+    memcpy(*data_out, null_pos + 1, data_len);
+    *len_out = data_len;
+
+    if (strncmp((char *)buffer, "blob", 4) == 0)
+        *type_out = OBJ_BLOB;
+    else if (strncmp((char *)buffer, "tree", 4) == 0)
+        *type_out = OBJ_TREE;
+    else
+        *type_out = OBJ_COMMIT;
+
+    free(buffer);
+    return 0;
+}
+
+void hash_to_hex(const ObjectID *id, char *hex) {
+    for (int i = 0; i < HASH_SIZE; i++) {
+        sprintf(hex + i * 2, "%02x", id->hash[i]);
+    }
+    hex[HASH_HEX_SIZE] = '\0';
+}
+
+int hex_to_hash(const char *hex, ObjectID *id) {
+    for (int i = 0; i < HASH_SIZE; i++) {
+        sscanf(hex + 2 * i, "%2hhx", &id->hash[i]);
+    }
+    return 0;
+}
+void object_path(const ObjectID *id, char *path, size_t size) {
+    snprintf(path, size, ".pes/objects/%02x", id->hash[0]);
+
+    mkdir(".pes", 0755);
+    mkdir(".pes/objects", 0755);
+    mkdir(path, 0755);
+
+    size_t len = strlen(path);
+    snprintf(path + len, size - len, "/");
+
+    for (int i = 1; i < HASH_SIZE; i++) {
+        snprintf(path + strlen(path), size - strlen(path), "%02x", id->hash[i]);
+    }
 }
